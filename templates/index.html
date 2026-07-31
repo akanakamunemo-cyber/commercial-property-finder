@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SA Commercial Property Finder</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #f5f6f8; color: #1c1c1e; }
+  header { background: #16213e; color: white; padding: 16px 24px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; margin-right: auto; }
+  select, button, input[type=number] { padding: 8px 12px; border-radius: 6px; border: 1px solid #ccc; font-size: 14px; }
+  button { background: #4f8cff; color: white; border: none; cursor: pointer; }
+  button:disabled { background: #999; cursor: not-allowed; }
+  #status { color: #ffd166; font-size: 13px; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 0; height: calc(100vh - 60px); }
+  #map { height: 100%; }
+  #table-wrap { overflow-y: auto; padding: 12px; }
+  table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; }
+  th, td { padding: 8px 10px; text-align: left; font-size: 13px; border-bottom: 1px solid #eee; }
+  th { background: #eef1f7; position: sticky; top: 0; }
+  tr:hover { background: #f0f4ff; cursor: pointer; }
+  .score { font-weight: 600; color: #2a7f43; }
+  .tier-High { color: #2a7f43; }
+  .tier-Medium-High { color: #6a9f2a; }
+  .tier-Medium { color: #c99a1e; }
+  .tier-Medium-Low { color: #c97a1e; }
+  .tier-Low { color: #c9421e; }
+  .empty { padding: 40px; text-align: center; color: #888; }
+  .note { font-size: 12px; color: #888; padding: 0 12px 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SA Commercial Property Finder</h1>
+  <select id="region">
+    {% for r in regions %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+  </select>
+  <input type="number" id="pages" value="2" min="1" max="10" title="Pages to scrape" style="width:70px">
+  <button id="run-btn" onclick="startScrape()">Scrape & Score</button>
+  <span id="status"></span>
+</header>
+<main>
+  <div id="map"></div>
+  <div id="table-wrap">
+    <div class="note">
+      Composite score = free-data foot-traffic proxy (nearby shop/food/transit/office density from OpenStreetMap)
+      + relative city income tier. Not measured visit data — use for ranking candidates against each other, not
+      absolute footfall counts. See README for upgrading to paid foot-traffic data.
+    </div>
+    <table id="results-table">
+      <thead>
+        <tr>
+          <th>#</th><th>Suburb</th><th>Price (ZAR)</th><th>Size (m²)</th><th>Score</th>
+          <th>Retail</th><th>Food</th><th>Transit</th><th>Offices</th><th>Income tier</th><th>Link</th>
+        </tr>
+      </thead>
+      <tbody id="results-body"></tbody>
+    </table>
+    <div id="empty-msg" class="empty" style="display:none">No results yet. Pick a region and click "Scrape & Score".</div>
+  </div>
+</main>
+
+<script>
+const map = L.map('map').setView([-29.0, 24.0], 5.3);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+let markers = [];
+
+function fmtZAR(n) {
+  if (n === null || n === undefined) return '-';
+  return 'R ' + n.toLocaleString();
+}
+
+function clearMarkers() {
+  markers.forEach(m => map.removeLayer(m));
+  markers = [];
+}
+
+function renderResults(results) {
+  const body = document.getElementById('results-body');
+  const emptyMsg = document.getElementById('empty-msg');
+  body.innerHTML = '';
+  clearMarkers();
+
+  if (!results.length) {
+    emptyMsg.style.display = 'block';
+    return;
+  }
+  emptyMsg.style.display = 'none';
+
+  const bounds = [];
+  results.forEach((r, i) => {
+    const poi = r.poi || {};
+    const counts = poi.counts || {};
+    const demo = r.demographics || {};
+    const tier = demo.income_tier || '-';
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${i + 1}</td>
+      <td>${r.suburb || '-'}</td>
+      <td>${fmtZAR(r.price_zar)}</td>
+      <td>${r.size_sqm ?? '-'}</td>
+      <td class="score">${r.composite_score ?? '-'}</td>
+      <td>${counts.retail ?? '-'}</td>
+      <td>${counts.food ?? '-'}</td>
+      <td>${counts.transit ?? '-'}</td>
+      <td>${counts.offices ?? '-'}</td>
+      <td class="tier-${tier}">${tier}</td>
+      <td>${r.url ? `<a href="${r.url}" target="_blank">view</a>` : '-'}</td>
+    `;
+    body.appendChild(tr);
+
+    if (r.lat && r.lon) {
+      const marker = L.marker([r.lat, r.lon])
+        .addTo(map)
+        .bindPopup(`<b>${r.suburb || ''}</b><br>${fmtZAR(r.price_zar)}<br>Score: ${r.composite_score ?? '-'}`);
+      markers.push(marker);
+      bounds.push([r.lat, r.lon]);
+      tr.onclick = () => { map.setView([r.lat, r.lon], 15); marker.openPopup(); };
+    }
+  });
+
+  if (bounds.length) map.fitBounds(bounds, { padding: [30, 30] });
+}
+
+async function loadResults() {
+  const res = await fetch('/api/results');
+  const data = await res.json();
+  renderResults(data);
+}
+
+async function pollStatus() {
+  const res = await fetch('/api/status');
+  const s = await res.json();
+  const statusEl = document.getElementById('status');
+  const btn = document.getElementById('run-btn');
+  if (s.running) {
+    statusEl.textContent = `Scraping ${s.region}...`;
+    btn.disabled = true;
+    setTimeout(pollStatus, 2000);
+  } else {
+    btn.disabled = false;
+    if (s.error) {
+      statusEl.textContent = 'Error: ' + s.error;
+    } else {
+      statusEl.textContent = '';
+      loadResults();
+    }
+  }
+}
+
+async function startScrape() {
+  const region = document.getElementById('region').value;
+  const pages = document.getElementById('pages').value;
+  document.getElementById('status').textContent = 'Starting...';
+  await fetch('/api/scrape', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ region, max_pages: pages })
+  });
+  pollStatus();
+}
+
+loadResults();
+</script>
+</body>
+</html>
